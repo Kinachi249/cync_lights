@@ -21,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 async def options_update_listener(
-    hass: HomeAssistant, config_entry: config_entries.ConfigEntry
+    hass: HomeAssistant, config_entry: ConfigEntry
 ):
     """Handle options update."""
     await hass.config_entries.async_reload(config_entry.entry_id)

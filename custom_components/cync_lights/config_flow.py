@@ -16,7 +16,7 @@ _LOGGER = logging.getLogger(__name__)
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required("username"): str,
-        vol.Required("password"): str,       
+        vol.Required("password"): str,
     }
 )
 STEP_TWO_FACTOR_CODE = vol.Schema(
@@ -143,9 +143,13 @@ class CyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "ambient_light_sensors",
                     description = {"suggested_value" : [device_id for device_id,device_info in self.data["data"]["cync_config"]["devices"].items() if device_info['AMBIENT_LIGHT']]},
                 ): cv.multi_select({device_id : f'{device_info["name"]} ({device_info["room_name"]}:{device_info["home_name"]})' for device_id,device_info in self.data["data"]["cync_config"]["devices"].items() if device_info.get('AMBIENT_LIGHT',False)}),
+                vol.Optional(
+                    "climate_control",
+                    description = {"suggested_value" : [device_id for device_id,device_info in self.data["data"]["cync_config"]["devices"].items() if device_info['CLIMATE']]},
+                ): cv.multi_select({device_id : f'{device_info["name"]} ({device_info["room_name"]}:{device_info["home_name"]})' for device_id,device_info in self.data["data"]["cync_config"]["devices"].items() if device_info.get('CLIMATE',False)}),
             }
         )
-        
+
         return self.async_show_form(step_id="select_switches", data_schema=switches_data_schema)
 
     async def _async_finish_setup(
@@ -154,7 +158,7 @@ class CyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Finish setup and create entry"""
 
         existing_entry = await self.async_set_unique_id(self.data['title'])
-        if not existing_entry:              
+        if not existing_entry:
             return self.async_create_entry(title=self.data["title"], data=self.data["data"], options=self.options)
         else:
             self.hass.config_entries.async_update_entry(existing_entry, data=self.data['data'], options=self.options)
@@ -181,9 +185,19 @@ class CyncOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Manage the options."""
 
+        errors = {}
+
         if user_input is not None:
             if user_input['re-authenticate'] == "No":
-                return await self.async_step_select_switches()
+                    try:
+                        self.data["data"]["cync_config"] = await self.cync_hub.get_cync_config()
+                    except InvalidAuth:
+                        errors["base"] = "invalid_auth"
+                    except Exception as e:  # pylint: disable=broad-except
+                        _LOGGER.error(e)
+                        errors["base"] = "unknown"
+                    else:
+                        return await self.async_step_select_switches()
             else:
                 return await self.async_step_auth()
 
@@ -277,6 +291,10 @@ class CyncOptionsFlowHandler(config_entries.OptionsFlow):
                     "ambient_light_sensors",
                     description = {"suggested_value" : [sensor for sensor in self.entry.options["ambient_light_sensors"] if sensor in self.entry.data["cync_config"]["devices"].keys()]},
                 ): cv.multi_select({device_id : f'{device_info["name"]} ({device_info["room_name"]}:{device_info["home_name"]})' for device_id,device_info in self.entry.data["cync_config"]["devices"].items() if device_info.get('AMBIENT_LIGHT',False)}),
+                vol.Optional(
+                    "climate_control",
+                    description = {"suggested_value" : [thermostat for thermostat in self.entry.options["climate_control"] if thermostat in self.entry.data["cync_config"]["devices"].keys()]},
+                ): cv.multi_select({device_id : f'{device_info["name"]} ({device_info["room_name"]}:{device_info["home_name"]})' for device_id,device_info in self.entry.data["cync_config"]["devices"].items() if device_info.get('CLIMATE',False)}),
             }
         )
 

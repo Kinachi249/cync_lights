@@ -22,10 +22,11 @@ Capabilities = {
     "RGB":[6,7,8,21,22,23,30,31,32,33,34,35,47,131,132,133,137,138,139,140,141,142,143,146,147,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171],
     "MOTION":[37,49,54],
     "AMBIENT_LIGHT":[37,49,54],
-    "WIFICONTROL":[36,37,38,39,40,47,48,49,51,52,53,54,55,56,57,58,59,61,62,63,64,65,66,67,68,80,81,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171,172],
+    "WIFICONTROL":[36,37,38,39,40,47,48,49,51,52,53,54,55,56,57,58,59,61,62,63,64,65,66,67,68,80,81,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171,172,224],
     "PLUG":[64,65,66,67,68,172],
     "FAN":[81],
-    "MULTIELEMENT":{'67':2}
+    "MULTIELEMENT":{'67':2},
+    "CLIMATE":[224]
 }
 
 class CyncHub:
@@ -48,7 +49,9 @@ class CyncHub:
         self.cync_switches = {device_id:CyncSwitch(device_id,switch_info,self.cync_rooms.get(switch_info['room'], None),self) for device_id,switch_info in user_data['cync_config']['devices'].items() if switch_info.get("ONOFF",False)}
         self.cync_motion_sensors = {device_id:CyncMotionSensor(device_id,device_info,self.cync_rooms.get(device_info['room'], None)) for device_id,device_info in user_data['cync_config']['devices'].items() if device_info.get("MOTION",False)}
         self.cync_ambient_light_sensors = {device_id:CyncAmbientLightSensor(device_id,device_info,self.cync_rooms.get(device_info['room'], None)) for device_id,device_info in user_data['cync_config']['devices'].items() if device_info.get("AMBIENT_LIGHT",False)}
+        self.cync_thermostats = {device_id:CyncThermostat(device_id,device_info,self.cync_rooms.get(device_info['room'], None),self) for device_id,device_info in user_data['cync_config']['devices'].items() if device_info.get("CLIMATE",False)}
         self.switchID_to_deviceIDs = {device_info.switch_id:[dev_id for dev_id, dev_info in self.cync_switches.items() if dev_info.switch_id == device_info.switch_id] for device_id, device_info in self.cync_switches.items() if int(device_info.switch_id) > 0}
+        self.switchID_to_deviceIDs.update({device_info.switch_id:[dev_id for dev_id, dev_info in self.cync_thermostats.items() if dev_info.switch_id == device_info.switch_id] for device_id, device_info in self.cync_thermostats.items() if int(device_info.switch_id) > 0})
         self.connected_devices_updated = False
         self.options = options
         self._seq_num = 0
@@ -78,6 +81,7 @@ class CyncHub:
             try:
                 context = ssl.create_default_context()
                 try:
+                    _LOGGER.debug("Connecting using default SSL")
                     self.reader, self.writer = await asyncio.open_connection('cm.gelighting.com', 23779, ssl = context)
                 except Exception as e:
                     _LOGGER.debug("SSL Connection Failed. Using relaxed SSL.")
@@ -89,7 +93,7 @@ class CyncHub:
                         _LOGGER.debug("Relaxed SSL Connection Failed. Attempting to connect without SSL.")
                         self.reader, self.writer = await asyncio.open_connection('cm.gelighting.com', 23778)
             except Exception as e:
-                _LOGGER.error(e)
+                _LOGGER.error(msg=f'Error on line 93: {e}')
                 await asyncio.sleep(5)
             else:
                 read_tcp_messages = asyncio.create_task(self._read_tcp_messages(), name = "Read TCP Messages")
@@ -102,10 +106,11 @@ class CyncHub:
                     for task in done:
                         name = task.get_name()
                         exception = task.exception()
+                        _LOGGER.debug(f'Task {name} with exception {exception}')
                         try:
                             result = task.result()
                         except Exception as e:
-                            _LOGGER.error(e)
+                            _LOGGER.error(msg=f'Error on line 110: {e}')
                     for task in pending:
                         task.cancel()
                     if not self.shutting_down:
@@ -114,7 +119,7 @@ class CyncHub:
                     else:
                         _LOGGER.info("Cync client shutting down")
                 except Exception as e:
-                    _LOGGER.error(e)
+                    _LOGGER.error(msg=f'Error on line 119: {e}')
 
     async def _read_tcp_messages(self):
         self.writer.write(self.login_code)
@@ -233,7 +238,7 @@ class CyncHub:
                             if command_received is not None:
                                 command_received(seq)
                 except Exception as e:
-                    _LOGGER.error(e)
+                    _LOGGER.error(msg=f'Error on line 235: {e}')
                 data = data[packet_length+5:]
         raise ShuttingDown
 
@@ -286,7 +291,14 @@ class CyncHub:
             await asyncio.sleep(2)
         for connected_devices in self.connected_devices.values():
             if len(connected_devices) > 0:
-                controller = self.cync_switches[connected_devices[0]].switch_id
+                first_connected_device = connected_devices[0]
+                if first_connected_device in self.cync_switches:
+                    controller = self.cync_switches[connected_devices[0]].switch_id
+                elif first_connected_device in self.cync_thermostats:
+                    controller = self.cync_thermostats[connected_devices[0]].switch_id
+                else:
+                    return
+
                 seq = self.get_seq_num()
                 state_request = bytes.fromhex('7300000018') + int(controller).to_bytes(4,'big') + seq.to_bytes(2,'big') + bytes.fromhex('007e00000000f85206000000ffff0000567e')
                 self.loop.call_soon_threadsafe(self.send_request,state_request)
@@ -308,7 +320,7 @@ class CyncHub:
         self.loop.call_soon_threadsafe(self.send_request,combo_request)
 
     def turn_on(self,switch_id,mesh_id,seq):
-        power_request = bytes.fromhex('730000001f') + int(switch_id).to_bytes(4,'big') + int(seq).to_bytes(2,'big') + bytes.fromhex('007e00000000f8d00d000000000000') + mesh_id + bytes.fromhex('d00000010000') + ((430 + int(mesh_id[0]) + int(mesh_id[1]))%256).to_bytes(1,'big') + bytes.fromhex('7e')
+        power_request = bytes.fromhex('730000001f') + int(switch_id).to_bytes(4,'big') + int(seq).to_bytes(2,'big') + bytes.fromhex('007e00010000f8d00d000000000000') + mesh_id + bytes.fromhex('d01102010000') + ((450 + int(mesh_id[0]) + int(mesh_id[1]))%256).to_bytes(1,'big') + bytes.fromhex('7e')
         self.loop.call_soon_threadsafe(self.send_request,power_request)
 
     def turn_off(self,switch_id,mesh_id,seq):
@@ -492,7 +504,12 @@ class CyncRoom:
         controllers = []
         if len(connected_devices) > 0:
             controllers = [self.hub.cync_switches[dev_id].switch_id for dev_id in self.all_room_switches if dev_id in connected_devices]
-            others_available = [self.hub.cync_switches[dev_id].switch_id for dev_id in connected_devices]
+
+            others_available = []
+            for device_id in connected_devices:
+                if device_id in self.hub.cync_switches:
+                    others_available.append(self.hub.cync_switches[device_id].switch_id)
+
             for controller in controllers:
                 if controller in others_available:
                     others_available.remove(controller)
@@ -634,7 +651,12 @@ class CyncSwitch:
                     controllers.append(self.switch_id)
             if self.room:
                 controllers = controllers + [self.hub.cync_switches[device_id].switch_id for device_id in self.room.all_room_switches if device_id in connected_devices and device_id != self.device_id]
-            others_available = [self.hub.cync_switches[device_id].switch_id for device_id in connected_devices]
+
+            others_available = []
+            for device_id in connected_devices:
+                if device_id in self.hub.cync_switches:
+                    others_available.append(self.hub.cync_switches[device_id].switch_id)
+
             for controller in controllers:
                 if controller in others_available:
                     others_available.remove(controller)
@@ -699,6 +721,42 @@ class CyncAmbientLightSensor:
     def publish_update(self):
         if self._update_callback:
             self._update_callback()
+
+class CyncThermostat:
+
+    def __init__(self, device_id, switch_info, room, hub):
+        self.hub = hub
+        self.device_id = device_id
+        self.switch_id = switch_info.get('switch_id','0')
+        self.home_id = [home_id for home_id, home_devices in self.hub.home_devices.items() if self.device_id in home_devices][0]
+        self.name = switch_info.get('name','unknown')
+        self.home_name = switch_info.get('home_name','unknown')
+        self.mesh_id = switch_info.get('mesh_id',0).to_bytes(2,'little')
+        self.room = room
+        self.default_controller = switch_info.get('switch_controller',self.hub.home_controllers[self.home_id][0])
+        self.controllers = []
+        self._update_callback = None
+        self._update_parent_room = None
+        self.support_brightness = switch_info.get('BRIGHTNESS',False)
+        self.support_color_temp = switch_info.get('COLORTEMP',False)
+        self.support_rgb = switch_info.get('RGB',False)
+        self.plug = switch_info.get('PLUG',False)
+        self.fan = switch_info.get('FAN',False)
+        self.climate = switch_info.get('CLIMATE', False)
+        self.elements = switch_info.get('MULTIELEMENT',1)
+        self._command_timout = 0.5
+        self._command_retry_time = 5
+
+    def register(self, update_callback) -> None:
+        """Register callback, called when switch changes state."""
+        self._update_callback = update_callback
+
+    def reset(self) -> None:
+        """Remove previously registered callback."""
+        self._update_callback = None
+
+    def register_room_updater(self, parent_updater):
+        self._update_parent_room = parent_updater
 
 class CyncUserData:
 
@@ -775,6 +833,7 @@ class CyncUserData:
                         "WIFICONTROL": device_type in Capabilities["WIFICONTROL"],
                         "PLUG" : device_type in Capabilities["PLUG"],
                         "FAN" : device_type in Capabilities["FAN"],
+                        "CLIMATE" : device_type in Capabilities["CLIMATE"],
                         'home_name':home['name'],
                         'room':'',
                         'room_name':''
