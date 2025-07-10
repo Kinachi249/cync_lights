@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 import asyncio
@@ -100,7 +101,8 @@ class CyncHub:
                 maintain_connection = asyncio.create_task(self._maintain_connection(), name = "Maintain Connection")
                 update_state = asyncio.create_task(self._update_state(), name = "Update State")
                 update_connected_devices = asyncio.create_task(self._update_connected_devices(), name = "Update Connected Devices")
-                read_write_tasks = [read_tcp_messages, maintain_connection, update_state, update_connected_devices]
+                update_datapoints = asyncio.create_task(self._update_datapoints(), name = "Update Datapoints")
+                read_write_tasks = [read_tcp_messages, maintain_connection, update_state, update_connected_devices, update_datapoints]
                 try:
                     done, pending = await asyncio.wait(read_write_tasks,return_when=asyncio.FIRST_EXCEPTION)
                     for task in done:
@@ -120,6 +122,12 @@ class CyncHub:
                         _LOGGER.info("Cync client shutting down")
                 except Exception as e:
                     _LOGGER.error(msg=f'Error on line 119: {e}')
+
+    async def _update_datapoints(self):
+        while not self.shutting_down:
+            for thermostat in self.cync_thermostats:
+
+
 
     async def _read_tcp_messages(self):
         self.writer.write(self.login_code)
@@ -167,7 +175,7 @@ class CyncHub:
                                 switch_id = str(struct.unpack(">I", packet[0:4])[0])
                                 home_id = self.switchID_to_homeID[switch_id]
                                 self._add_connected_devices(switch_id, home_id)
-                                packet = packet[23:]
+                                packet = packet[22:]
                                 while len(packet) > 24:
                                     deviceID = self.home_devices[home_id][int(packet[0])]
                                     if deviceID in self.cync_switches:
@@ -211,8 +219,9 @@ class CyncHub:
                                 packet = packet[7:]
                                 while packet:
                                     datapoint_id = packet[0]
+                                    datapoint_type = (struct.unpack(">H", packet[1:3])[0] & 0xF000) >> 12
                                     datapoint_length = struct.unpack(">H", packet[1:3])[0] & 0xFFF
-                                    if int(packet[3]) < len(self.home_devices[home_id]):
+                                    if int(packet[3]) < len(self.home_devices[home_id]) and datapoint_type != 9:
                                         deviceID = self.home_devices[home_id][int(packet[3])]
                                         if deviceID in self.cync_switches:
                                             if self.cync_switches[deviceID].elements > 1:
@@ -227,6 +236,12 @@ class CyncHub:
                                                 color_temp = int(packet[6])
                                                 rgb = {'r':int(packet[7]),'g':int(packet[8]),'b':int(packet[9]),'active':int(packet[6])==254}
                                                 self.cync_switches[deviceID].update_switch(state,brightness,color_temp,rgb)
+                                    elif datapoint_type == 9 and datapoint_id == 87:
+                                        # Type 9 = string
+                                        state_string = packet[3:datapoint_length + 3].decode('utf-8')
+                                        device_ids = self.switchID_to_deviceIDs[switch_id]
+                                        for device_id in device_ids:
+                                            self.cync_thermostats[device_id].updateTemperature(state_string)
                                     packet = packet[datapoint_length + 3:]
                         elif packet_type in {168, 171}:
                             switch_id = str(struct.unpack(">I", packet[0:4])[0])
@@ -737,15 +752,12 @@ class CyncThermostat:
         self.controllers = []
         self._update_callback = None
         self._update_parent_room = None
-        self.support_brightness = switch_info.get('BRIGHTNESS',False)
-        self.support_color_temp = switch_info.get('COLORTEMP',False)
-        self.support_rgb = switch_info.get('RGB',False)
-        self.plug = switch_info.get('PLUG',False)
-        self.fan = switch_info.get('FAN',False)
-        self.climate = switch_info.get('CLIMATE', False)
-        self.elements = switch_info.get('MULTIELEMENT',1)
         self._command_timout = 0.5
         self._command_retry_time = 5
+        self._device_access_key = None
+
+        self.temperature = None
+        self.datapoints = {}
 
     def register(self, update_callback) -> None:
         """Register callback, called when switch changes state."""
@@ -757,6 +769,20 @@ class CyncThermostat:
 
     def register_room_updater(self, parent_updater):
         self._update_parent_room = parent_updater
+
+    def publish_update(self):
+        if self._update_callback:
+            self._update_callback()
+
+    
+
+    def updateTemperature(self, temperatureJson):
+        temperatureJson = temperatureJson[12:]
+        temp_data = json.loads(temperatureJson)
+        self.temperature = float(temp_data[0]['Temperature'][0:-1])
+        _LOGGER.info("Fetched temp data")
+        self.publish_update()
+
 
 class CyncUserData:
 
